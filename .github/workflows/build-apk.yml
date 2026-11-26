@@ -1,77 +1,184 @@
-name: APK Derle
+
+name: Adana Halay - APK Derle
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: apk-${{ github.ref }}
+  group: adana-apk-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
+    name: Android APK Oluştur
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
+
     steps:
+      # 1. Depoyu indir
       - name: Kodu çek
         uses: actions/checkout@v4
 
-      - name: Node kur
+      # 2. Proje klasörünü otomatik bul
+      - name: Proje klasörünü bul
+        id: project
+        shell: bash
+        run: |
+          if [ -f "package.json" ]; then
+            DIR="."
+          elif [ -f "Adana/package.json" ]; then
+            DIR="Adana"
+          else
+            FILE=$(find . -maxdepth 4 -type f -name package.json \
+              -not -path '*/node_modules/*' | head -n 1)
+
+            if [ -z "$FILE" ]; then
+              echo "::error::package.json bulunamadı!"
+              exit 1
+            fi
+
+            DIR=$(dirname "$FILE")
+          fi
+
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "Proje klasörü: $DIR"
+
+      # 3. Node.js kur
+      - name: Node.js 20 kur
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
+      # 4. Java 17 kur
       - name: Java 17 kur
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+          cache: gradle
 
+      # 5. Proje dosyalarını kontrol et
+      - name: Dosyaları kontrol et
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          test -f package.json
+          test -f capacitor.config.json
+          test -f www/index.html
+          test -f scripts/copy-three.js
+          echo "Proje dosyaları kontrol edildi."
+
+      # 6. NPM bağımlılıklarını kur
       - name: Bağımlılıkları kur
+        working-directory: ${{ steps.project.outputs.dir }}
         run: npm install --no-audit --no-fund
 
-      - name: Three.js'i www içine kopyala
-        run: npm run prepare-www
-
-      - name: Android projesini oluştur
+      # 7. Three.js dosyasını hazırla
+      - name: Three.js hazırla
+        working-directory: ${{ steps.project.outputs.dir }}
         run: |
-          npx cap add android
+          npm run prepare-www
+          test -f www/three.min.js
+
+      # 8. Android projesini oluştur ve senkronize et
+      - name: Android projesini hazırla
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          if [ ! -d android ]; then
+            npx cap add android
+          fi
+
           npx cap sync android
 
+      # 9. APK sürüm numarasını ayarla
       - name: Sürüm numarasını ayarla
+        working-directory: ${{ steps.project.outputs.dir }}
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" android/app/build.gradle
-          sed -i "s/versionName \"1.0\"/versionName \"2.0.${{ github.run_number }}\"/" android/app/build.gradle
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
 
-      - name: Debug APK derle
-        working-directory: android
+          path = Path("android/app/build.gradle")
+          if not path.exists():
+              raise SystemExit("Android build.gradle bulunamadı!")
+
+          content = path.read_text()
+          content, count_code = re.subn(
+              r'(?m)^(\s*versionCode\s+)\d+',
+              lambda m: m.group(1) + os.environ["BUILD_NUMBER"],
+              content,
+              count=1
+          )
+          content, count_name = re.subn(
+              r'(?m)^(\s*versionName\s+)["\'][^"\']*["\']',
+              lambda m: m.group(1) + '"2.0.' + os.environ["BUILD_NUMBER"] + '"',
+              content,
+              count=1
+          )
+
+          if count_code != 1 or count_name != 1:
+              raise SystemExit("Sürüm bilgileri otomatik güncellenemedi!")
+
+          path.write_text(content)
+          print("APK sürümü:", "2.0." + os.environ["BUILD_NUMBER"])
+          PY
+
+      # 10. Debug APK derle
+      - name: APK derle
+        working-directory: ${{ steps.project.outputs.dir }}/android
         run: |
-          chmod +x ./gradlew
+          chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: APK'yı adlandır
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk adana-halay-dugunu.apk
+      # 11. APK dosyasını hazırla
+      - name: APK dosyasını hazırla
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
 
-      - name: Artifact olarak yükle
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK oluşturulamadı!"
+            exit 1
+          fi
+
+          cp "$APK" adana-halay-dugunu.apk
+          ls -lh adana-halay-dugunu.apk
+
+      # 12. APK indirme dosyası
+      - name: APK Artifact yükle
         uses: actions/upload-artifact@v4
         with:
           name: adana-halay-dugunu-apk
-          path: adana-halay-dugunu.apk
+          path: ${{ steps.project.outputs.dir }}/adana-halay-dugunu.apk
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: latest etiketini güncelle
+      # 13. GitHub Release yayınla
+      - name: Latest etiketini güncelle
+        working-directory: ${{ steps.project.outputs.dir }}
         run: |
           git tag -f latest
           git push -f origin latest
 
-      - name: En güncel APK'yı Release olarak yayınla
+      - name: APK Release yayınla
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: En Güncel APK
-          body: "Son commit'ten otomatik derlenen APK (build #${{ github.run_number }})."
-          files: adana-halay-dugunu.apk
+          name: Adana Halay - En Güncel APK
+          body: |
+            Adana Halay Düğünü Android uygulaması.
+
+            Otomatik derleme numarası: ${{ github.run_number }}
+            Sürüm: 2.0.${{ github.run_number }}
+          files: ${{ steps.project.outputs.dir }}/adana-halay-dugunu.apk
           make_latest: true
+          fail_on_unmatched_files: true
