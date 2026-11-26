@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Kodu çek
         uses: actions/checkout@v4
@@ -19,7 +24,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
       - name: Java 17 kur
         uses: actions/setup-java@v4
@@ -28,7 +32,7 @@ jobs:
           java-version: 17
 
       - name: Bağımlılıkları kur
-        run: npm install
+        run: npm install --no-audit --no-fund
 
       - name: Three.js'i www içine kopyala
         run: npm run prepare-www
@@ -38,13 +42,18 @@ jobs:
           npx cap add android
           npx cap sync android
 
+      - name: Sürüm numarasını ayarla
+        run: |
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/" android/app/build.gradle
+          sed -i "s/versionName \"1.0\"/versionName \"2.0.${{ github.run_number }}\"/" android/app/build.gradle
+
       - name: Debug APK derle
         working-directory: android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: APK'yı yeniden adlandır
+      - name: APK'yı adlandır
         run: cp android/app/build/outputs/apk/debug/app-debug.apk adana-halay-dugunu.apk
 
       - name: Artifact olarak yükle
@@ -53,11 +62,16 @@ jobs:
           name: adana-halay-dugunu-apk
           path: adana-halay-dugunu.apk
 
-      - name: "Release: en güncel APK (latest)"
+      - name: latest etiketini güncelle
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: En güncel APK'yı Release olarak yayınla
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: En Güncel APK
-          body: "Son commit'ten otomatik derlenen APK."
+          body: "Son commit'ten otomatik derlenen APK (build #${{ github.run_number }})."
           files: adana-halay-dugunu.apk
           make_latest: true
