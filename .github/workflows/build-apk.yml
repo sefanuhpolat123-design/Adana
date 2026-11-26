@@ -1,0 +1,63 @@
+name: APK Derle
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Node kur
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Java 17 kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Bağımlılıkları kur
+        run: npm install
+
+      - name: Three.js'i www içine kopyala
+        run: npm run prepare-www
+
+      - name: Android projesini oluştur
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Debug APK derle
+        working-directory: android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: APK'yı yeniden adlandır
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk adana-halay-dugunu.apk
+
+      - name: Artifact olarak yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: adana-halay-dugunu-apk
+          path: adana-halay-dugunu.apk
+
+      - name: "Release: en güncel APK (latest)"
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: En Güncel APK
+          body: "Son commit'ten otomatik derlenen APK."
+          files: adana-halay-dugunu.apk
+          make_latest: true
