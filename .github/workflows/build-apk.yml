@@ -1,184 +1,213 @@
 
-name: Adana Halay - APK Derle
+name: Adana Halay - Otomatik APK Derleme
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: adana-apk-${{ github.ref }}
+  group: adana-apk-build
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Android APK Oluştur
+    name: En Güncel ZIP Dosyasından APK
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
-      # 1. Depoyu indir
-      - name: Kodu çek
+      - name: GitHub deposunu indir
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # 2. Proje klasörünü otomatik bul
-      - name: Proje klasörünü bul
-        id: project
-        shell: bash
-        run: |
-          if [ -f "package.json" ]; then
-            DIR="."
-          elif [ -f "Adana/package.json" ]; then
-            DIR="Adana"
-          else
-            FILE=$(find . -maxdepth 4 -type f -name package.json \
-              -not -path '*/node_modules/*' | head -n 1)
-
-            if [ -z "$FILE" ]; then
-              echo "::error::package.json bulunamadı!"
-              exit 1
-            fi
-
-            DIR=$(dirname "$FILE")
-          fi
-
-          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-          echo "Proje klasörü: $DIR"
-
-      # 3. Node.js kur
       - name: Node.js 20 kur
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 4. Java 17 kur
       - name: Java 17 kur
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
 
-      # 5. Proje dosyalarını kontrol et
-      - name: Dosyaları kontrol et
-        working-directory: ${{ steps.project.outputs.dir }}
+      - name: En güncel ZIP dosyasını bul ve aç
+        id: source
+        shell: bash
         run: |
-          test -f package.json
-          test -f capacitor.config.json
-          test -f www/index.html
-          test -f scripts/copy-three.js
-          echo "Proje dosyaları kontrol edildi."
+          python3 <<'PY'
+          import os
+          import zipfile
+          import subprocess
+          from pathlib import Path
 
-      # 6. NPM bağımlılıklarını kur
-      - name: Bağımlılıkları kur
-        working-directory: ${{ steps.project.outputs.dir }}
+          root = Path.cwd()
+          excluded = {".git", "node_modules", "build", "android"}
+          archives = []
+
+          for p in root.rglob("*"):
+              if not p.is_file() or p.suffix.lower() != ".zip":
+                  continue
+              if any(part in excluded for part in p.relative_to(root).parts):
+                  continue
+
+              result = subprocess.run(
+                  ["git", "log", "-1", "--format=%ct", "--", str(p.relative_to(root))],
+                  capture_output=True, text=True
+              )
+
+              timestamp = int(result.stdout.strip() or 0)
+              archives.append((timestamp, p))
+
+          if not archives:
+              raise SystemExit("HATA: Depoda ZIP dosyası bulunamadı!")
+
+          archives.sort(key=lambda x: x[0], reverse=True)
+          selected = archives[0][1]
+
+          print("Seçilen ZIP:", selected)
+
+          destination = Path(os.environ["RUNNER_TEMP"]) / "adana-source"
+          destination.mkdir(parents=True, exist_ok=True)
+
+          with zipfile.ZipFile(selected) as z:
+              for info in z.infolist():
+                  target = (destination / info.filename).resolve()
+                  if os.path.commonpath([str(destination.resolve()), str(target)]) != str(destination.resolve()):
+                      raise SystemExit("Güvenli olmayan ZIP dosya yolu!")
+              z.extractall(destination)
+
+          manifests = [
+              p for p in destination.rglob("package.json")
+              if "node_modules" not in p.parts
+          ]
+
+          if not manifests:
+              raise SystemExit("HATA: ZIP içerisinde package.json bulunamadı!")
+
+          manifests.sort(key=lambda p: (len(p.relative_to(destination).parts), str(p)))
+          project = manifests[0].parent
+
+          required = [
+              "package.json",
+              "capacitor.config.json",
+              "www/index.html",
+              "scripts/copy-three.js"
+          ]
+
+          for item in required:
+              if not (project / item).is_file():
+                  raise SystemExit(f"Eksik proje dosyası: {item}")
+
+          print("Proje klasörü:", project)
+
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"PROJECT_DIR={project}\n")
+              f.write(f"ZIP_NAME={selected.name}\n")
+          PY
+
+      - name: Seçilen projeyi göster
+        run: |
+          echo "Seçilen ZIP: $ZIP_NAME"
+          echo "Proje klasörü: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: NPM bağımlılıklarını kur
+        working-directory: ${{ env.PROJECT_DIR }}
         run: npm install --no-audit --no-fund
 
-      # 7. Three.js dosyasını hazırla
-      - name: Three.js hazırla
-        working-directory: ${{ steps.project.outputs.dir }}
+      - name: Three.js dosyasını hazırla
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           npm run prepare-www
           test -f www/three.min.js
 
-      # 8. Android projesini oluştur ve senkronize et
-      - name: Android projesini hazırla
-        working-directory: ${{ steps.project.outputs.dir }}
+      - name: Android projesini oluştur
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          if [ ! -d android ]; then
-            npx cap add android
-          fi
-
+          npx cap add android
           npx cap sync android
 
-      # 9. APK sürüm numarasını ayarla
-      - name: Sürüm numarasını ayarla
-        working-directory: ${{ steps.project.outputs.dir }}
+      - name: APK sürümünü ayarla
+        working-directory: ${{ env.PROJECT_DIR }}
         env:
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          python3 - <<'PY'
+          python3 <<'PY'
           import os
           import re
           from pathlib import Path
 
-          path = Path("android/app/build.gradle")
-          if not path.exists():
-              raise SystemExit("Android build.gradle bulunamadı!")
+          p = Path("android/app/build.gradle")
+          if not p.exists():
+              raise SystemExit("build.gradle bulunamadı!")
 
-          content = path.read_text()
-          content, count_code = re.subn(
+          s = p.read_text()
+
+          s, a = re.subn(
               r'(?m)^(\s*versionCode\s+)\d+',
               lambda m: m.group(1) + os.environ["BUILD_NUMBER"],
-              content,
-              count=1
+              s, count=1
           )
-          content, count_name = re.subn(
+
+          s, b = re.subn(
               r'(?m)^(\s*versionName\s+)["\'][^"\']*["\']',
               lambda m: m.group(1) + '"2.0.' + os.environ["BUILD_NUMBER"] + '"',
-              content,
-              count=1
+              s, count=1
           )
 
-          if count_code != 1 or count_name != 1:
-              raise SystemExit("Sürüm bilgileri otomatik güncellenemedi!")
+          if a != 1 or b != 1:
+              raise SystemExit("Sürüm bilgileri ayarlanamadı!")
 
-          path.write_text(content)
-          print("APK sürümü:", "2.0." + os.environ["BUILD_NUMBER"])
+          p.write_text(s)
           PY
 
-      # 10. Debug APK derle
-      - name: APK derle
-        working-directory: ${{ steps.project.outputs.dir }}/android
+      - name: Android APK derle
+        working-directory: ${{ env.PROJECT_DIR }}/android
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
 
-      # 11. APK dosyasını hazırla
       - name: APK dosyasını hazırla
-        working-directory: ${{ steps.project.outputs.dir }}
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
 
-          if [ ! -f "$APK" ]; then
-            echo "::error::APK oluşturulamadı!"
-            exit 1
-          fi
+          test -f "$APK"
+          mkdir -p output
+          cp "$APK" output/adana-halay-dugunu.apk
 
-          cp "$APK" adana-halay-dugunu.apk
-          ls -lh adana-halay-dugunu.apk
+          ls -lh output/adana-halay-dugunu.apk
 
-      # 12. APK indirme dosyası
-      - name: APK Artifact yükle
+      - name: APK indirilebilir dosya olarak yükle
         uses: actions/upload-artifact@v4
         with:
           name: adana-halay-dugunu-apk
-          path: ${{ steps.project.outputs.dir }}/adana-halay-dugunu.apk
+          path: ${{ env.PROJECT_DIR }}/output/adana-halay-dugunu.apk
           if-no-files-found: error
           retention-days: 30
 
-      # 13. GitHub Release yayınla
       - name: Latest etiketini güncelle
-        working-directory: ${{ steps.project.outputs.dir }}
         run: |
           git tag -f latest
           git push -f origin latest
 
-      - name: APK Release yayınla
+      - name: GitHub Release yayınla
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Adana Halay - En Güncel APK
           body: |
-            Adana Halay Düğünü Android uygulaması.
+            Otomatik ZIP kaynaklı Android APK.
 
-            Otomatik derleme numarası: ${{ github.run_number }}
+            Kaynak ZIP: ${{ env.ZIP_NAME }}
+            Derleme: #${{ github.run_number }}
             Sürüm: 2.0.${{ github.run_number }}
-          files: ${{ steps.project.outputs.dir }}/adana-halay-dugunu.apk
+          files: ${{ env.PROJECT_DIR }}/output/adana-halay-dugunu.apk
           make_latest: true
           fail_on_unmatched_files: true
